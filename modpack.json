@@ -1,0 +1,23 @@
+{
+  "manifestVersion": 2,
+  "name": "EnhancedFlanking",
+  "version": "1.0.0",
+  "author": "Dusty",
+  "description": "Adds angle-based flanking and backstab combat damage bonuses.",
+  "loadOrder": 10,
+  "patches": {},
+  "assets": {},
+  "code": {
+    "sources": [],
+    "references": [
+      "MelonLoader",
+      "0Harmony",
+      "Il2CppInterop.Runtime",
+      "Il2Cppmscorlib",
+      "Assembly-CSharp",
+      "Menace.ModpackLoader"
+    ],
+    "prebuiltDlls": ["EnhancedFlanking.dll"]
+  },
+  "securityStatus": "SourceVerified"
+}
