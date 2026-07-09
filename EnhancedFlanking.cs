@@ -15,19 +15,19 @@ public class EnhancedFlanking : IModpackPlugin
     private HarmonyLib.Harmony _harmony;
     private const string MOD_SETTINGS_GROUP = "EnhancedFlanking";
     private const string _logPrefix = "";
-    private static readonly bool IS_DEBUG_LOGGING = true;
+    private static readonly bool IS_DEBUG_LOGGING = false;
 
     // accuracy
     private const string FLANKING_BONUS_PERCENT_KEY = "FlankingBonusPercent";
-    private const int MIN_ACC_BONUS_PERCENT = 1;
-    private const int MAX_ACC_BONUS_PERCENT = 300;
-    private const int DEFAULT_ACC_FLANKING_BONUS_PERCENT = 20;
+    private const float MIN_ACC_BONUS_PERCENT = 0f;
+    private const float MAX_ACC_BONUS_PERCENT = 300f;
+    private const float DEFAULT_ACC_FLANKING_BONUS_PERCENT = 50f;
 
     // damage
     private const string FLANKING_DAMAGE_BONUS_PERCENT_KEY = "FlankingDamageBonusPercent";
-    private const int MIN_FLANKING_DAMAGE_BONUS_PERCENT = 1;
-    private const int MAX_FLANKING_DAMAGE_BONUS_PERCENT = 300;
-    private const int DEFAULT_FLANKING_DAMAGE_BONUS_PERCENT = 20;
+    private const float MIN_FLANKING_DAMAGE_BONUS_PERCENT = 0f;
+    private const float MAX_FLANKING_DAMAGE_BONUS_PERCENT = 300f;
+    private const float DEFAULT_FLANKING_DAMAGE_BONUS_PERCENT = 20f;
 
     /// <summary>
     /// Logs a message to the mod's logger (MelonLoader's logging system)
@@ -142,7 +142,7 @@ public class EnhancedFlanking : IModpackPlugin
             return;
         }
 
-        // Condition 1: Must be a ranged attack
+        // Must be a ranged attack
         if (__instance.GetItem() == null)
         {
             DebugLog("Not a weapon attack, skipping ");
@@ -153,7 +153,7 @@ public class EnhancedFlanking : IModpackPlugin
         // Calculate flanking state and save it directly into our persistent context object
         FlankStateTracker.CurrentlyEvaluatingSkill = __instance;
 
-        // Condition 2: Must have a valid target entity to check for infantry type
+        // Must have a valid target entity to check for infantry type
         if (target == null)
         {
             DebugLog("Failed to resolve target entity, skipping");
@@ -169,7 +169,7 @@ public class EnhancedFlanking : IModpackPlugin
             return;
         }
 
-        // Condition 3: Must not have any cover applied, otherwise we are not fully flanking
+        // Must not have any cover applied, otherwise we are not fully flanking
         if (__result.CoverMult != 1f)
         {
             // Any amount of cover means we are not fully flanking
@@ -180,12 +180,19 @@ public class EnhancedFlanking : IModpackPlugin
 
         context.IsFlanking = true;
 
-        int bonusPercent = GetFlankingAccBonusPercent();
-        float flankingMultiplier = bonusPercent / 100f;
+        float bonusPercent = GetFlankingAccBonusPercent();
+        float flankingMultiplier = 1f + (bonusPercent / 100f);
         var newFinalAccuracyValue = __result.FinalValue * flankingMultiplier;
+        if (newFinalAccuracyValue > 100f)
+        {
+            DebugLog($"New final accuracy value exceeds 100, capping to 100");
+            newFinalAccuracyValue = 100f;
+        }
+
         DebugLog(
             $"Flanking! Bonus={bonusPercent}% ({flankingMultiplier:0.00}x) New final value: {newFinalAccuracyValue} (was: {__result.FinalValue})"
         );
+
         __result.FinalValue = newFinalAccuracyValue;
         return;
     }
@@ -195,6 +202,11 @@ public class EnhancedFlanking : IModpackPlugin
     /// based on the current skill evaluation context. If the skill that triggered
     /// this evaluation is actively flanking, the weapon's damage multiplier
     /// will be adjusted accordingly.
+    ///
+    /// Because the engine decouples Skills from WeaponTemplates, they execute sequentially on the same thread.
+    /// 1. GetHitchance ran first, verified the geometric flank, and cached the active Skill pointer to 'CurrentlyEvaluatingSkill'.
+    /// 2. This line pulls that cached Skill pointer and checks our master ledger (ConditionalWeakTable).
+    /// 3. If a match is found and 'IsFlanking' is true, we know this specific damage payload belongs to the flanking shot.
     /// </summary>
     /// <param name="__instance">The weapon template instance</param>
     /// <param name="_properties">The target's properties</param>
@@ -206,6 +218,10 @@ public class EnhancedFlanking : IModpackPlugin
         // Grab the skill that put us into this calculation loop
         Skill activeSkill = FlankStateTracker.CurrentlyEvaluatingSkill;
 
+        // Because the engine decouples Skills from WeaponTemplates, they execute sequentially on the same thread.
+        // 1. GetHitchance ran first, verified the geometric flank, and cached the active Skill pointer to 'CurrentlyEvaluatingSkill'.
+        // 2. This line pulls that cached Skill pointer and checks our master ledger (ConditionalWeakTable).
+        // 3. If a match is found and 'IsFlanking' is true, we know this specific damage payload belongs to the flanking shot.
         if (
             activeSkill != null
             && FlankStateTracker.ActiveFlanks.TryGetValue(activeSkill, out var context)
@@ -213,7 +229,7 @@ public class EnhancedFlanking : IModpackPlugin
         {
             if (context.IsFlanking)
             {
-                float dmgMultiplier = GetFlankingDamageBonusPercent() / 100f;
+                float dmgMultiplier = 1f + (GetFlankingDamageBonusPercent() / 100f);
                 _properties.DamageMult *= dmgMultiplier;
                 DebugLog(
                     $"[WEAPON MATCHED VIA THREAD] Buffed damage for weapon template using active skill context."
@@ -223,13 +239,12 @@ public class EnhancedFlanking : IModpackPlugin
     }
 
     /// <summary>
-    /// Retrieves the configured flanking accuracy bonus percentage from the mod settings.
-    /// Ensures the value is within the allowed range, otherwise returns the default value.
+    /// Returns the configured flanking accuracy bonus percentage from the mod settings.
     /// </summary>
     /// <returns>The flanking accuracy bonus percentage to apply.</returns>
-    private static int GetFlankingAccBonusPercent()
+    private static float GetFlankingAccBonusPercent()
     {
-        int value = ModSettings.Get<int>(MOD_SETTINGS_GROUP, FLANKING_BONUS_PERCENT_KEY);
+        float value = ModSettings.Get<float>(MOD_SETTINGS_GROUP, FLANKING_BONUS_PERCENT_KEY);
         if (value < MIN_ACC_BONUS_PERCENT || value > MAX_ACC_BONUS_PERCENT)
         {
             value = DEFAULT_ACC_FLANKING_BONUS_PERCENT;
@@ -243,9 +258,9 @@ public class EnhancedFlanking : IModpackPlugin
     /// Ensures the value is within the allowed range, otherwise returns the default value.
     /// </summary>
     /// <returns>The flanking damage bonus percentage to apply.</returns>
-    private static int GetFlankingDamageBonusPercent()
+    private static float GetFlankingDamageBonusPercent()
     {
-        int value = ModSettings.Get<int>(MOD_SETTINGS_GROUP, FLANKING_DAMAGE_BONUS_PERCENT_KEY);
+        float value = ModSettings.Get<float>(MOD_SETTINGS_GROUP, FLANKING_DAMAGE_BONUS_PERCENT_KEY);
         if (value < MIN_FLANKING_DAMAGE_BONUS_PERCENT || value > MAX_FLANKING_DAMAGE_BONUS_PERCENT)
         {
             value = DEFAULT_FLANKING_DAMAGE_BONUS_PERCENT;
@@ -268,7 +283,7 @@ public class EnhancedFlanking : IModpackPlugin
             {
                 // Settings for accuracy when flanking
                 settings.AddHeader("Enhanced Flanking");
-                settings.AddNumber(
+                settings.AddSlider(
                     FLANKING_BONUS_PERCENT_KEY,
                     "Flanking Bonus Percent",
                     MIN_ACC_BONUS_PERCENT,
@@ -277,7 +292,7 @@ public class EnhancedFlanking : IModpackPlugin
                 );
 
                 // Settings for damage when flanking
-                settings.AddNumber(
+                settings.AddSlider(
                     FLANKING_DAMAGE_BONUS_PERCENT_KEY,
                     "Flanking Damage Bonus Percent",
                     MIN_FLANKING_DAMAGE_BONUS_PERCENT,
