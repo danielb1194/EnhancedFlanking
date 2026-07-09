@@ -1,10 +1,12 @@
-﻿using System.Runtime.CompilerServices;
+﻿using System;
+using System.Runtime.CompilerServices;
 using Il2CppMenace.Items;
 using Il2CppMenace.Tactical;
 using Il2CppMenace.Tactical.Skills;
 using MelonLoader;
 using Menace.ModpackLoader;
 using Menace.SDK;
+using UnityEngine;
 
 namespace EnhancedFlanking;
 
@@ -15,18 +17,21 @@ public class EnhancedFlanking : IModpackPlugin
     private HarmonyLib.Harmony _harmony;
     private const string MOD_SETTINGS_GROUP = "EnhancedFlanking";
     private const string _logPrefix = "";
-    private static readonly bool IS_DEBUG_LOGGING = false;
+
+    // Debugging logs
+    private const string DEBUG_LOGGING_KEY = "DebugLogging";
+    private static readonly bool DEFAULT_IS_DEBUG_LOGGING = false;
 
     // accuracy
     private const string FLANKING_BONUS_PERCENT_KEY = "FlankingBonusPercent";
     private const float MIN_ACC_BONUS_PERCENT = 0f;
-    private const float MAX_ACC_BONUS_PERCENT = 300f;
-    private const float DEFAULT_ACC_FLANKING_BONUS_PERCENT = 50f;
+    private const float MAX_ACC_BONUS_PERCENT = 100f;
+    private const float DEFAULT_ACC_FLANKING_BONUS_PERCENT = 20f;
 
     // damage
     private const string FLANKING_DAMAGE_BONUS_PERCENT_KEY = "FlankingDamageBonusPercent";
     private const float MIN_FLANKING_DAMAGE_BONUS_PERCENT = 0f;
-    private const float MAX_FLANKING_DAMAGE_BONUS_PERCENT = 300f;
+    private const float MAX_FLANKING_DAMAGE_BONUS_PERCENT = 100f;
     private const float DEFAULT_FLANKING_DAMAGE_BONUS_PERCENT = 20f;
 
     /// <summary>
@@ -45,7 +50,7 @@ public class EnhancedFlanking : IModpackPlugin
     /// <param name="message">The message to log if debug logging is enabled.</param>
     public static void DebugLog(string message)
     {
-        if (IS_DEBUG_LOGGING)
+        if (ModSettings.Get<bool>(MOD_SETTINGS_GROUP, DEBUG_LOGGING_KEY))
         {
             Log(message);
         }
@@ -68,9 +73,13 @@ public class EnhancedFlanking : IModpackPlugin
 
         DebugLog("Applying patch...");
         var patchesApplied = new PatchSet(_harmony, "EnhancedFlanking")
-            .Postfix("Skill", "GetHitchance", OnAfterGetHitChanceHandler)
-            .Prefix("WeaponTemplate", "ApplyToEntityProperties", OnWeaponTemplateApplyToProperties)
-            .Postfix("Skill", "OnUse", OnAfterUseSkill)
+            .Prefix("Skill", "GetHitchance", OnGetHitChance_Prefix)
+            .Prefix(
+                "WeaponTemplate",
+                "ApplyToEntityProperties",
+                OnWeaponTemplateApplyToProperties_Prefix
+            )
+            .Postfix("Skill", "OnUse", OnUseSkill_Postfix)
             .Apply();
 
         DebugLog($"Patches applied: {patchesApplied}");
@@ -91,7 +100,7 @@ public class EnhancedFlanking : IModpackPlugin
     /// <param name="_user">The actor who used the skill.</param>
     /// <param name="_targetTile">The tile targeted by the skill.</param>
     /// <param name="_usageParams">Additional usage parameters for the skill</param>
-    public static void OnAfterUseSkill(
+    public static void OnUseSkill_Postfix(
         Skill __instance,
         Actor _user,
         Tile _targetTile,
@@ -118,7 +127,7 @@ public class EnhancedFlanking : IModpackPlugin
     /// <param name="_includeDropoff">Indicates whether hit chance dropoff should be included in the calculation.</param>
     /// <param name="_forImmediateUse">Indicates whether the skill is being evaluated for immediate use.</param>
     /// <param name="__result">The calculated hit chance for the skill.</param>
-    private static void OnAfterGetHitChanceHandler(
+    private static void OnGetHitChance_Prefix(
         Skill __instance,
         Tile _from,
         Tile _targetTile,
@@ -126,8 +135,7 @@ public class EnhancedFlanking : IModpackPlugin
         EntityProperties _defenderProperties,
         Entity _overrideTargetEntity,
         bool _includeDropoff,
-        bool _forImmediateUse,
-        HitChance __result
+        bool _forImmediateUse
     )
     {
         // Get or create the unique thread/GC-safe context for this specific skill instance
@@ -137,7 +145,7 @@ public class EnhancedFlanking : IModpackPlugin
 
         if (target == null)
         {
-            DebugLog("Failed to resolve target entity, skipping");
+            DebugLog("Failed to resolve target entity");
             context.IsFlanking = false; // Explicitly clear it if conditions fail
             return;
         }
@@ -145,7 +153,7 @@ public class EnhancedFlanking : IModpackPlugin
         // Must be a ranged attack
         if (__instance.GetItem() == null)
         {
-            DebugLog("Not a weapon attack, skipping ");
+            DebugLog("Not a weapon attack");
             context.IsFlanking = false; // Explicitly clear it if conditions fail
             return;
         }
@@ -153,27 +161,26 @@ public class EnhancedFlanking : IModpackPlugin
         // Calculate flanking state and save it directly into our persistent context object
         FlankStateTracker.CurrentlyEvaluatingSkill = __instance;
 
-        // Must have a valid target entity to check for infantry type
-        if (target == null)
-        {
-            DebugLog("Failed to resolve target entity, skipping");
-            context.IsFlanking = false; // Explicitly clear it if conditions fail
-            return;
-        }
-
         // And must be infantry
         if (!target.IsInfantry())
         {
-            DebugLog($"Target is not infantry, skipping");
+            DebugLog($"Target is not infantry");
             context.IsFlanking = false; // Explicitly clear it if conditions fail
             return;
         }
 
         // Must not have any cover applied, otherwise we are not fully flanking
-        if (__result.CoverMult != 1f)
+        float coverMult = __instance.GetCoverMult(
+            _from,
+            _targetTile,
+            target,
+            _defenderProperties,
+            false
+        );
+        if (coverMult != 1f)
         {
             // Any amount of cover means we are not fully flanking
-            DebugLog($"Not flanking completely, nothing applied");
+            DebugLog($"Not flanking completely");
             context.IsFlanking = false; // Explicitly clear it if conditions fail
             return;
         }
@@ -181,20 +188,13 @@ public class EnhancedFlanking : IModpackPlugin
         context.IsFlanking = true;
 
         float bonusPercent = GetFlankingAccBonusPercent();
-        float flankingMultiplier = 1f + (bonusPercent / 100f);
-        var newFinalAccuracyValue = __result.FinalValue * flankingMultiplier;
-        if (newFinalAccuracyValue > 100f)
-        {
-            DebugLog($"New final accuracy value exceeds 100, capping to 100");
-            newFinalAccuracyValue = 100f;
-        }
+        var newFinalAccuracyValue = _properties.GetAccuracy() * (1f + bonusPercent / 100f);
 
         DebugLog(
-            $"Flanking! Bonus={bonusPercent}% ({flankingMultiplier:0.00}x) New final value: {newFinalAccuracyValue} (was: {__result.FinalValue})"
+            $"[Flanking] Bonus={bonusPercent}% New final value: {newFinalAccuracyValue} (was: {_properties.GetAccuracy()})"
         );
 
-        __result.FinalValue = newFinalAccuracyValue;
-        return;
+        _properties.Accuracy = newFinalAccuracyValue;
     }
 
     /// <summary>
@@ -210,7 +210,7 @@ public class EnhancedFlanking : IModpackPlugin
     /// </summary>
     /// <param name="__instance">The weapon template instance</param>
     /// <param name="_properties">The target's properties</param>
-    public static void OnWeaponTemplateApplyToProperties(
+    public static void OnWeaponTemplateApplyToProperties_Prefix(
         WeaponTemplate __instance,
         EntityProperties _properties
     )
@@ -229,11 +229,13 @@ public class EnhancedFlanking : IModpackPlugin
         {
             if (context.IsFlanking)
             {
-                float dmgMultiplier = 1f + (GetFlankingDamageBonusPercent() / 100f);
-                _properties.DamageMult *= dmgMultiplier;
+                float dmgBonusPercent = GetFlankingDamageBonusPercent();
+                float dmgMultiplier = 1f + (dmgBonusPercent / 100f);
+                float newDamage = _properties.Damage * dmgMultiplier;
                 DebugLog(
-                    $"[WEAPON MATCHED VIA THREAD] Buffed damage for weapon template using active skill context."
+                    $"Buffed damage by {dmgBonusPercent}% ({dmgMultiplier}x) - from: {_properties.Damage} to: {newDamage}"
                 );
+                _properties.Damage = newDamage;
             }
         }
     }
@@ -245,12 +247,8 @@ public class EnhancedFlanking : IModpackPlugin
     private static float GetFlankingAccBonusPercent()
     {
         float value = ModSettings.Get<float>(MOD_SETTINGS_GROUP, FLANKING_BONUS_PERCENT_KEY);
-        if (value < MIN_ACC_BONUS_PERCENT || value > MAX_ACC_BONUS_PERCENT)
-        {
-            value = DEFAULT_ACC_FLANKING_BONUS_PERCENT;
-        }
 
-        return value;
+        return Math.Clamp(value, MIN_ACC_BONUS_PERCENT, MAX_ACC_BONUS_PERCENT);
     }
 
     /// <summary>
@@ -282,10 +280,10 @@ public class EnhancedFlanking : IModpackPlugin
             settings =>
             {
                 // Settings for accuracy when flanking
-                settings.AddHeader("Enhanced Flanking");
+                settings.AddHeader("Accuracy Bonus");
                 settings.AddSlider(
                     FLANKING_BONUS_PERCENT_KEY,
-                    "Flanking Bonus Percent",
+                    "Accuracy Bonus (%)",
                     MIN_ACC_BONUS_PERCENT,
                     MAX_ACC_BONUS_PERCENT,
                     DEFAULT_ACC_FLANKING_BONUS_PERCENT
@@ -294,10 +292,17 @@ public class EnhancedFlanking : IModpackPlugin
                 // Settings for damage when flanking
                 settings.AddSlider(
                     FLANKING_DAMAGE_BONUS_PERCENT_KEY,
-                    "Flanking Damage Bonus Percent",
+                    "Damage Bonus (%)",
                     MIN_FLANKING_DAMAGE_BONUS_PERCENT,
                     MAX_FLANKING_DAMAGE_BONUS_PERCENT,
                     DEFAULT_FLANKING_DAMAGE_BONUS_PERCENT
+                );
+
+                // Settings for debug logging
+                settings.AddToggle(
+                    DEBUG_LOGGING_KEY,
+                    "Enable Debug Logging",
+                    DEFAULT_IS_DEBUG_LOGGING
                 );
             }
         );
