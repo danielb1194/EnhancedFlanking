@@ -6,7 +6,9 @@
   "description": "Adds angle-based flanking and backstab combat damage bonuses.",
   "loadOrder": 10,
   "patches": {},
-  "assets": {},
+  "assets": {
+    "flanking.png": "./assets/flanking.png"
+  },
   "code": {
     "sources": [],
     "references": [

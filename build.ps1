@@ -9,6 +9,7 @@ $ProjectRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 
 $ProjectFile = Join-Path $ProjectRoot "EnhancedFlanking.csproj"
 $ManifestFile = Join-Path $ProjectRoot "modpack.json"
+$AssetsDir = Join-Path $ProjectRoot "assets"
 
 if (-not (Test-Path $ProjectFile)) {
     throw "Project file not found: $ProjectFile"
@@ -47,6 +48,7 @@ $outputRoot = Join-Path $ProjectRoot $OutputDir
 $modpackFolderName = "$modName-modpack"
 $stagingRoot = Join-Path $outputRoot $modpackFolderName
 $dllsDir = Join-Path $stagingRoot "dlls"
+$stagingAssetsDir = Join-Path $stagingRoot "assets"
 $zipPath = Join-Path $outputRoot ("{0}-{1}.zip" -f $modpackFolderName, $modVersion)
 
 Write-Host "Building $assemblyName ($Configuration/$TargetFramework)..."
@@ -69,8 +71,13 @@ if (Test-Path $zipPath) {
 }
 
 New-Item -ItemType Directory -Path $dllsDir -Force | Out-Null
+New-Item -ItemType Directory -Path $stagingAssetsDir -Force | Out-Null
 Copy-Item $ManifestFile (Join-Path $stagingRoot "modpack.json") -Force
 Copy-Item $builtDll (Join-Path $dllsDir ("{0}.dll" -f $assemblyName)) -Force
+
+if (Test-Path $AssetsDir) {
+    Copy-Item -Path (Join-Path $AssetsDir "*") -Destination $stagingAssetsDir -Recurse -Force
+}
 
 Write-Host "Creating zip package..."
 Compress-Archive -Path $stagingRoot -DestinationPath $zipPath -Force

@@ -1,6 +1,4 @@
 ﻿using System;
-using System.Runtime.CompilerServices;
-using Il2CppMenace.Items;
 using Il2CppMenace.Tactical;
 using Il2CppMenace.Tactical.Skills;
 using MelonLoader;
@@ -15,7 +13,7 @@ public class EnhancedFlanking : IModpackPlugin
     private static EnhancedFlanking _instance;
     private MelonLogger.Instance _log;
     private HarmonyLib.Harmony _harmony;
-    private const string MOD_SETTINGS_GROUP = "EnhancedFlanking";
+    public const string MOD_SETTINGS_GROUP = "EnhancedFlanking";
     private const string _logPrefix = "";
 
     // Debugging logs
@@ -33,6 +31,19 @@ public class EnhancedFlanking : IModpackPlugin
     private const float MIN_FLANKING_DAMAGE_BONUS_PERCENT = 0f;
     private const float MAX_FLANKING_DAMAGE_BONUS_PERCENT = 100f;
     private const float DEFAULT_FLANKING_DAMAGE_BONUS_PERCENT = 20f;
+
+    // HUD
+    private const string HUD_ICON_VISIBILITY_KEY = "HUDIconVisibility";
+    private static readonly bool DEFAULT_IS_HUD_ICON_VISIBLE = true;
+    public const string HUD_ICON_POSITION_X_KEY = "HUDIconPositionX";
+    private const int MIN_HUD_ICON_POSITION_X = -10;
+    private const int MAX_HUD_ICON_POSITION_X = 10;
+    private const int DEFAULT_HUD_ICON_POSITION_X = 0;
+
+    public const string HUD_ICON_POSITION_Y_KEY = "HUDIconPositionY";
+    private const int MIN_HUD_ICON_POSITION_Y = -10;
+    private const int MAX_HUD_ICON_POSITION_Y = 10;
+    private const int DEFAULT_HUD_ICON_POSITION_Y = -2;
 
     /// <summary>
     /// Logs a message to the mod's logger (MelonLoader's logging system)
@@ -74,12 +85,10 @@ public class EnhancedFlanking : IModpackPlugin
         DebugLog("Applying patch...");
         var patchesApplied = new PatchSet(_harmony, "EnhancedFlanking")
             .Prefix("Skill", "GetHitchance", OnGetHitChance_Prefix)
-            .Prefix(
-                "WeaponTemplate",
-                "ApplyToEntityProperties",
-                OnWeaponTemplateApplyToProperties_Prefix
-            )
             .Postfix("Skill", "OnUse", OnUseSkill_Postfix)
+            .Postfix("SkillAction", "HandleMouseMoveOnTile", OnHandleMouseMoveOnTile_Postfix)
+            .Postfix("SkillAction", "HandleLeftClickOnTile", OnHandleLeftClickOnTile_Postfix)
+            .Postfix("SkillAction", "Cancel", OnCancelSkillAction_Postfix)
             .Apply();
 
         DebugLog($"Patches applied: {patchesApplied}");
@@ -94,7 +103,69 @@ public class EnhancedFlanking : IModpackPlugin
     public void OnSceneLoaded(int buildIndex, string sceneName) { }
 
     /// <summary>
-    /// Handles logic to be executed after a skill is used, clearing the flank evaluation state.
+    /// Called after a skill action is canceled, ensuring that any active flank indicator
+    /// is removed from the screen
+    /// </summary>
+    /// <param name="_activeActor">The actor who canceled the skill action.</param>
+    public static void OnCancelSkillAction_Postfix(Actor _activeActor)
+    {
+        FlankPreviewHUDTracker.ClearIcon();
+    }
+
+    /// <summary>
+    /// Called after a left-click action on a tile, ensuring that any active flank indicator
+    /// is removed from the screen.
+    /// </summary>
+    /// <param name="_tile">The tile that was clicked.</param>
+    /// <param name="_activeActor">The actor who performed the click action.</param>
+    public static void OnHandleLeftClickOnTile_Postfix(Tile _tile, Actor _activeActor)
+    {
+        FlankPreviewHUDTracker.ClearIcon();
+    }
+
+    /// <summary>
+    /// Called after the mouse moves over a tile, updating the flank indicator based on
+    /// the current flanking state.
+    /// </summary>
+    /// <param name="_mouseWorldPos"></param>
+    /// <param name="_currentTile"></param>
+    /// <param name="_oldTile"></param>
+    /// <param name="_activeActor"></param>
+    public static void OnHandleMouseMoveOnTile_Postfix(
+        Vector3 _mouseWorldPos,
+        Tile _currentTile,
+        Tile _oldTile,
+        Actor _activeActor
+    )
+    {
+        // early return when showing the icon is disabled by user settings
+        if (!GetHudIconVisibility())
+        {
+            FlankPreviewHUDTracker.ClearIcon();
+            return;
+        }
+        // Show icon if flanking
+        if (
+            CheckIfValidFlanking(
+                FlankStateTracker.CurrentlyEvaluatingSkill,
+                _activeActor.GetTile(),
+                _currentTile
+            )
+        )
+        {
+            FlankPreviewHUDTracker.SetIcon(_currentTile);
+        }
+        else
+        {
+            FlankPreviewHUDTracker.ClearIcon();
+        }
+    }
+
+    /// <summary>
+    /// Handles logic to be executed after a skill is used, clearing the flank
+    /// evaluation state.
+    ///
+    /// TODO: Evaluate if this logic can be merged with the SkillAction.HandleLeftClickOnTile
     /// </summary>
     /// <param name="__instance">The skill instance that was used.</param>
     /// <param name="_user">The actor who used the skill.</param>
@@ -109,14 +180,81 @@ public class EnhancedFlanking : IModpackPlugin
     {
         // Clear the thread assignment so it doesn't leak into subsequent non-skill tooltips
         FlankStateTracker.CurrentlyEvaluatingSkill = null;
-        DebugLog($"Finished OnAfterUseSkill for __instance={__instance}");
+        DebugLog($"Cleared flank state for skill {__instance} {__instance.UsageId}");
+    }
+
+    /// <summary>
+    /// Determines whether the given combination of requirements satisfies the flanking conditions.
+    /// </summary>
+    /// <param name="_skill">The currently selected skill to use</param>
+    /// <param name="_fromTile">The tile from which the skill is being used</param>
+    /// <param name="_targetTile">The tile being targeted by the skill</param>
+    /// <returns>True if the flanking conditions are satisfied, false otherwise</returns>
+    private static bool CheckIfValidFlanking(Skill _skill, Tile _fromTile, Tile _targetTile)
+    {
+        Entity target = _targetTile.GetEntity();
+
+        // Must be a valid target entity
+        if (target == null)
+        {
+            DebugLog("Failed to resolve target entity");
+            return false;
+        }
+
+        // Must not be self
+        if (_fromTile == _targetTile)
+        {
+            DebugLog("Cannot flank self");
+            return false;
+        }
+
+        // Must have a valid skill
+        if (_skill == null)
+        {
+            DebugLog("Skill is null");
+            return false;
+        }
+
+        // Must be a ranged attack
+        if (_skill.GetItem() == null)
+        {
+            DebugLog("Not a weapon attack (Item is null)");
+            return false;
+        }
+
+        // And must be infantry
+        if (!target.IsInfantry())
+        {
+            DebugLog($"Target is not infantry");
+            return false;
+        }
+
+        // Must not have any cover applied, otherwise we are not fully flanking
+        float coverMult = _skill.GetCoverMult(
+            _fromTile,
+            _targetTile,
+            target,
+            _targetTile.GetEntity().GetCurrentProperties(),
+            false
+        );
+        // Any cover multiplier other than 1 indicates that the target has cover
+        // Note that cover multiplier calculation takes into consideration the
+        // direction of the attack.
+        if (coverMult != 1f)
+        {
+            DebugLog($"Not flanking completely");
+            return false;
+        }
+
+        // If all checks pass, we are fully flanking
+        DebugLog($"[FLANKING] Fully flanking target entity {target}");
+        return true;
     }
 
     /// <summary>
     /// Handles logic to be executed after the hit chance for a skill has been
-    /// calculated, determining and recording whether the skill is flanking
-    /// the target. This allows subsequent systems to query the flanking
-    /// state for the skill evaluation.
+    /// calculated, determining and recording in internal state whether the skill is flanking
+    /// the target. Applies flanking bonuses when the skill is determined to be flanking.
     /// </summary>
     /// <param name="__instance">The skill instance for which the hit chance was calculated.</param>
     /// <param name="_from">The tile from which the skill is being used.</param>
@@ -138,106 +276,101 @@ public class EnhancedFlanking : IModpackPlugin
         bool _forImmediateUse
     )
     {
-        // Get or create the unique thread/GC-safe context for this specific skill instance
-        var context = FlankStateTracker.ActiveFlanks.GetOrCreateValue(__instance);
-
-        Entity target = _targetTile.GetEntity();
-
-        if (target == null)
-        {
-            DebugLog("Failed to resolve target entity");
-            context.IsFlanking = false; // Explicitly clear it if conditions fail
-            return;
-        }
-
-        // Must be a ranged attack
-        if (__instance.GetItem() == null)
-        {
-            DebugLog("Not a weapon attack");
-            context.IsFlanking = false; // Explicitly clear it if conditions fail
-            return;
-        }
-
-        // Calculate flanking state and save it directly into our persistent context object
+        // set the current skill being evaluated
         FlankStateTracker.CurrentlyEvaluatingSkill = __instance;
-
-        // And must be infantry
-        if (!target.IsInfantry())
+        bool result = CheckIfValidFlanking(__instance, _from, _targetTile);
+        // Clear flanking icon on failure and reset the currently evaluating skill
+        if (!result)
         {
-            DebugLog($"Target is not infantry");
-            context.IsFlanking = false; // Explicitly clear it if conditions fail
+            FlankPreviewHUDTracker.ClearIcon();
+            FlankStateTracker.CurrentlyEvaluatingSkill = null;
             return;
         }
 
-        // Must not have any cover applied, otherwise we are not fully flanking
-        float coverMult = __instance.GetCoverMult(
-            _from,
-            _targetTile,
-            target,
-            _defenderProperties,
-            false
-        );
-        if (coverMult != 1f)
-        {
-            // Any amount of cover means we are not fully flanking
-            DebugLog($"Not flanking completely");
-            context.IsFlanking = false; // Explicitly clear it if conditions fail
-            return;
-        }
-
-        context.IsFlanking = true;
-
-        float bonusPercent = GetFlankingAccBonusPercent();
-        var newFinalAccuracyValue = _properties.GetAccuracy() * (1f + bonusPercent / 100f);
+        // Update the internal flank state for the skill evaluation
+        FlankStateTracker.ActiveFlanks.GetOrCreateValue(__instance);
+        float bonusAccPercent = GetFlankingAccBonusPercent();
+        float bonusAccMult = 1f + bonusAccPercent / 100f;
+        var newFinalAccuracyValue = _properties.GetAccuracy() * bonusAccMult;
 
         DebugLog(
-            $"[Flanking] Bonus={bonusPercent}% New final value: {newFinalAccuracyValue} (was: {_properties.GetAccuracy()})"
+            $"[FLANKING] BonusAcc={bonusAccPercent}% {_properties.GetAccuracy()} * {bonusAccMult} = {newFinalAccuracyValue}"
+        );
+
+        float bonusDmgPercent = GetFlankingDamageBonusPercent();
+        var bonusDmgMult = 1f + bonusDmgPercent / 100f;
+        var newFinalDamageValue = _properties.GetDamage() * bonusDmgMult;
+        DebugLog(
+            $"[FLANKING] BonusDmg={bonusDmgPercent}% {_properties.GetDamage()} * {bonusDmgMult} = {newFinalDamageValue}"
         );
 
         _properties.Accuracy = newFinalAccuracyValue;
+        _properties.Damage = newFinalDamageValue;
     }
 
     /// <summary>
-    /// Applies flanking-related modifications to a weapon template's properties
-    /// based on the current skill evaluation context. If the skill that triggered
-    /// this evaluation is actively flanking, the weapon's damage multiplier
-    /// will be adjusted accordingly.
-    ///
-    /// Because the engine decouples Skills from WeaponTemplates, they execute sequentially on the same thread.
-    /// 1. GetHitchance ran first, verified the geometric flank, and cached the active Skill pointer to 'CurrentlyEvaluatingSkill'.
-    /// 2. This line pulls that cached Skill pointer and checks our master ledger (ConditionalWeakTable).
-    /// 3. If a match is found and 'IsFlanking' is true, we know this specific damage payload belongs to the flanking shot.
+    /// Configures the mod settings for the Enhanced Flanking Mod.
     /// </summary>
-    /// <param name="__instance">The weapon template instance</param>
-    /// <param name="_properties">The target's properties</param>
-    public static void OnWeaponTemplateApplyToProperties_Prefix(
-        WeaponTemplate __instance,
-        EntityProperties _properties
-    )
+    /// <param name="modSettingsGroup">
+    /// The group name under which the mod settings should be registered.
+    /// </param>
+    private static void ConfigureModSettings(string modSettingsGroup)
     {
-        // Grab the skill that put us into this calculation loop
-        Skill activeSkill = FlankStateTracker.CurrentlyEvaluatingSkill;
-
-        // Because the engine decouples Skills from WeaponTemplates, they execute sequentially on the same thread.
-        // 1. GetHitchance ran first, verified the geometric flank, and cached the active Skill pointer to 'CurrentlyEvaluatingSkill'.
-        // 2. This line pulls that cached Skill pointer and checks our master ledger (ConditionalWeakTable).
-        // 3. If a match is found and 'IsFlanking' is true, we know this specific damage payload belongs to the flanking shot.
-        if (
-            activeSkill != null
-            && FlankStateTracker.ActiveFlanks.TryGetValue(activeSkill, out var context)
-        )
-        {
-            if (context.IsFlanking)
+        ModSettings.Register(
+            modSettingsGroup,
+            settings =>
             {
-                float dmgBonusPercent = GetFlankingDamageBonusPercent();
-                float dmgMultiplier = 1f + (dmgBonusPercent / 100f);
-                float newDamage = _properties.Damage * dmgMultiplier;
-                DebugLog(
-                    $"Buffed damage by {dmgBonusPercent}% ({dmgMultiplier}x) - from: {_properties.Damage} to: {newDamage}"
+                // Settings for accuracy when flanking
+                settings.AddHeader("Bonuses");
+                settings.AddSlider(
+                    FLANKING_BONUS_PERCENT_KEY,
+                    "Accuracy Bonus (%)",
+                    MIN_ACC_BONUS_PERCENT,
+                    MAX_ACC_BONUS_PERCENT,
+                    DEFAULT_ACC_FLANKING_BONUS_PERCENT
                 );
-                _properties.Damage = newDamage;
+
+                // Settings for damage when flanking
+                settings.AddSlider(
+                    FLANKING_DAMAGE_BONUS_PERCENT_KEY,
+                    "Damage Bonus (%)",
+                    MIN_FLANKING_DAMAGE_BONUS_PERCENT,
+                    MAX_FLANKING_DAMAGE_BONUS_PERCENT,
+                    DEFAULT_FLANKING_DAMAGE_BONUS_PERCENT
+                );
+
+                // Settings for debug logging
+                settings.AddToggle(
+                    DEBUG_LOGGING_KEY,
+                    "Enable Debug Logging",
+                    DEFAULT_IS_DEBUG_LOGGING
+                );
+
+                settings.AddHeader("HUD Icon");
+                // Settings for the HUD icon visibility
+                settings.AddToggle(
+                    HUD_ICON_VISIBILITY_KEY,
+                    "Show HUD Icon",
+                    DEFAULT_IS_HUD_ICON_VISIBLE
+                );
+
+                // Settings for the icon's position
+                settings.AddNumber(
+                    HUD_ICON_POSITION_X_KEY,
+                    "HUD Icon X Position",
+                    MIN_HUD_ICON_POSITION_X,
+                    MAX_HUD_ICON_POSITION_X,
+                    DEFAULT_HUD_ICON_POSITION_X
+                );
+                settings.AddNumber(
+                    HUD_ICON_POSITION_Y_KEY,
+                    "HUD Icon Y Position",
+                    MIN_HUD_ICON_POSITION_Y,
+                    MAX_HUD_ICON_POSITION_Y,
+                    DEFAULT_HUD_ICON_POSITION_Y
+                );
             }
-        }
+        );
     }
 
     /// <summary>
@@ -268,44 +401,13 @@ public class EnhancedFlanking : IModpackPlugin
     }
 
     /// <summary>
-    /// Configures the mod settings for the Enhanced Flanking plugin, registering the
-    /// accuracy and damage bonus percentage settings so they can be adjusted in the
-    /// mod settings UI.
+    /// Retrieves the configured HUD icon visibility setting from the mod settings.
     /// </summary>
-    /// <param name="modSettingsGroup">The group name under which the mod settings should be registered.</param>
-    private static void ConfigureModSettings(string modSettingsGroup)
+    /// <returns>True if the HUD icon should be visible, false otherwise.</returns>
+    private static bool GetHudIconVisibility()
     {
-        ModSettings.Register(
-            modSettingsGroup,
-            settings =>
-            {
-                // Settings for accuracy when flanking
-                settings.AddHeader("Accuracy Bonus");
-                settings.AddSlider(
-                    FLANKING_BONUS_PERCENT_KEY,
-                    "Accuracy Bonus (%)",
-                    MIN_ACC_BONUS_PERCENT,
-                    MAX_ACC_BONUS_PERCENT,
-                    DEFAULT_ACC_FLANKING_BONUS_PERCENT
-                );
-
-                // Settings for damage when flanking
-                settings.AddSlider(
-                    FLANKING_DAMAGE_BONUS_PERCENT_KEY,
-                    "Damage Bonus (%)",
-                    MIN_FLANKING_DAMAGE_BONUS_PERCENT,
-                    MAX_FLANKING_DAMAGE_BONUS_PERCENT,
-                    DEFAULT_FLANKING_DAMAGE_BONUS_PERCENT
-                );
-
-                // Settings for debug logging
-                settings.AddToggle(
-                    DEBUG_LOGGING_KEY,
-                    "Enable Debug Logging",
-                    DEFAULT_IS_DEBUG_LOGGING
-                );
-            }
-        );
+        bool value = ModSettings.Get<bool>(MOD_SETTINGS_GROUP, HUD_ICON_VISIBILITY_KEY);
+        return value;
     }
 
     /// <summary>
@@ -314,29 +416,10 @@ public class EnhancedFlanking : IModpackPlugin
     /// </summary>
     public void OnUnload()
     {
-        DebugLog("EnhancedFlanking unloadeding...");
+        DebugLog("EnhancedFlanking unloading...");
+        // Remove any existing icons from HUD
+        FlankPreviewHUDTracker.ClearIcon();
         // Always cleanly unsubscribe when the plugin unloads
         _harmony.UnpatchSelf();
-    }
-}
-
-/// <summary>
-/// Tracks the flanking state for skills during combat math evaluation, allowing
-/// the Enhanced Flanking plugin to determine whether a skill is currently
-/// benefiting from a flanking bonus. Maintains a mapping of active flanks
-/// per skill and provides a thread-static reference to the skill currently
-/// being evaluated.
-/// </summary>
-public static class FlankStateTracker
-{
-    public static readonly ConditionalWeakTable<Skill, FlankContext> ActiveFlanks = new();
-
-    // The bridge: keeps track of which skill is currently evaluating combat math
-    [System.ThreadStatic]
-    public static Skill CurrentlyEvaluatingSkill;
-
-    public class FlankContext
-    {
-        public bool IsFlanking;
     }
 }

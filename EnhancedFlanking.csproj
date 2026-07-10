@@ -37,6 +37,14 @@
       <HintPath>$(GameDir)/MelonLoader/Il2CppAssemblies/UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.UIElementsModule">
+      <HintPath>$(GameDir)/MelonLoader/Il2CppAssemblies/UnityEngine.UIElementsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.ImageConversionModule">
+      <HintPath>$(GameDir)/MelonLoader/Il2CppAssemblies/UnityEngine.ImageConversionModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
 
     <!-- The Menace SDK itself -->
     <Reference Include="Menace.ModpackLoader">
