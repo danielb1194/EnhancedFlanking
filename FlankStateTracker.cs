@@ -1,6 +1,8 @@
 using System.Runtime.CompilerServices;
 using Il2CppMenace.Tactical.Skills;
 
+namespace EnhancedFlanking;
+
 /// <summary>
 /// Tracks the flanking state for skills during combat math evaluation, allowing
 /// the Enhanced Flanking plugin to determine whether a skill is currently
