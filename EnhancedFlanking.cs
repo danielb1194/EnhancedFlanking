@@ -139,7 +139,7 @@ public class EnhancedFlanking : IModpackPlugin
     )
     {
         // early return when showing the icon is disabled by user settings
-        if (!GetHudIconVisibility())
+        if (!CheckHudIconSettingEnabled())
         {
             FlankPreviewHUDTracker.ClearIcon();
             return;
@@ -404,7 +404,7 @@ public class EnhancedFlanking : IModpackPlugin
     /// Retrieves the configured HUD icon visibility setting from the mod settings.
     /// </summary>
     /// <returns>True if the HUD icon should be visible, false otherwise.</returns>
-    private static bool GetHudIconVisibility()
+    private static bool CheckHudIconSettingEnabled()
     {
         bool value = ModSettings.Get<bool>(MOD_SETTINGS_GROUP, HUD_ICON_VISIBILITY_KEY);
         return value;
