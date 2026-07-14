@@ -57,7 +57,7 @@ public static class FlankPreviewHUDTracker
                         return _cachedFlankingSprite;
                     }
                 }
-                EnhancedFlanking.Log(
+                EnhancedFlanking.DebugLog(
                     $"[HUD ERROR] Asset file missing or unreadable at target path: {assetPath}"
                 );
             }
@@ -136,7 +136,7 @@ public static class FlankPreviewHUDTracker
             }
         }
 
-        EnhancedFlanking.Log(
+        EnhancedFlanking.DebugLog(
             $"[HUD Success] Spawning flanking preview text over {_activeTile} at scene pos {worldPos}"
         );
 
